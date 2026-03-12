@@ -1,0 +1,55 @@
+stages:
+  - build
+  - scan
+  - plan
+  - deploy
+
+variables:
+  AWS_DEFAULT_REGION: eu-west-1
+  ECR_REPO: "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+  ECR_REPO_NAME: "myapp"
+
+build:
+  stage: build
+  image: docker:24
+  services: [docker:24-dind]
+  script:
+    - docker build -t $ECR_REPO:$CI_COMMIT_SHA -t $ECR_REPO:latest .
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO
+    - docker push $ECR_REPO:$CI_COMMIT_SHA
+    - docker push $ECR_REPO:latest
+  only: [main, develop]
+
+scan:
+  stage: scan
+  image: aquasec/trivy:latest
+  script:
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $ECR_REPO:$CI_COMMIT_SHA
+  allow_failure: true
+
+plan:
+  stage: plan
+  image:
+    name: hashicorp/terraform:1.6
+    entrypoint: [""]
+  script:
+    - cd terraform
+    - terraform init -backend-config="bucket=${TF_STATE_BUCKET}"
+    - terraform plan -out=tfplan -var="image_tag=$CI_COMMIT_SHA"
+  artifacts:
+    paths: [terraform/tfplan]
+  only: [main]
+
+deploy:
+  stage: deploy
+  image:
+    name: hashicorp/terraform:1.6
+    entrypoint: [""]
+  script:
+    - cd terraform
+    - terraform init -backend-config="bucket=${TF_STATE_BUCKET}"
+    - terraform apply -auto-approve tfplan
+  environment:
+    name: production
+  when: manual
+  only: [main]
